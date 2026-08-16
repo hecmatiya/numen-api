@@ -64,7 +64,15 @@ public final class StdioMcpTransport implements McpTransport {
             f.completeExceptionally(new RuntimeException("stdio write failed: " + ex.getMessage(), ex));
             return f;
         }
-        return f.orTimeout(Math.max(1000, timeoutMs), TimeUnit.MILLISECONDS);
+        // orTimeout() returns a NEW future: when the timeout fires, the original f is left
+        // incomplete, so the whenComplete cleanup above never runs and the pending entry
+        // leaks forever (the server never answers). Complete the original future on
+        // timeout/cancel so the ledger entry is always reclaimed.
+        CompletableFuture<JsonObject> timed = f.orTimeout(Math.max(1000, timeoutMs), TimeUnit.MILLISECONDS);
+        timed.whenComplete((r, e) -> {
+            if (e != null && !f.isDone()) f.completeExceptionally(e);
+        });
+        return timed;
     }
 
     @Override

@@ -105,6 +105,17 @@ public final class VoicePipeline {
         });
     }
 
+    /**
+     * 说一整句（"整句模式",与流式喂 chunk 相对）：入队等播,<b>不打断</b>当前
+     * 播放。同一 pipeline 上连续调用会自然逐句接续——前句播完才起后句,不会
+     * 叠音。供 speak 工具用（外置大脑逐句说话,节奏由句子自身时长决定）。
+     * 主线程调用。
+     */
+    public void speak(String text) {
+        enqueue(divider.feed(text));
+        enqueue(divider.flush());
+    }
+
     /** 停播 + 清队列 + 作废一切在途回调。主线程调用（abort / 死亡 / 收尾）。 */
     public void interrupt() {
         generation++;

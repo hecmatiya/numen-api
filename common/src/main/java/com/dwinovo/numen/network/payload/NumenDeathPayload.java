@@ -38,7 +38,7 @@ public record NumenDeathPayload(UUID entityUuid, String cause, long respawnDelay
     public static final StreamCodec<RegistryFriendlyByteBuf, NumenDeathPayload> STREAM_CODEC =
             StreamCodec.composite(
                     UUIDUtil.STREAM_CODEC, NumenDeathPayload::entityUuid,
-                    ByteBufCodecs.STRING_UTF8, NumenDeathPayload::cause,
+                    ByteBufCodecs.stringUtf8(256), NumenDeathPayload::cause,
                     ByteBufCodecs.VAR_LONG, NumenDeathPayload::respawnDelayMs,
                     NumenDeathPayload::new);
 

@@ -28,7 +28,7 @@ public record NumenEventPayload(UUID entityUuid, String xml, boolean principal) 
     public static final StreamCodec<RegistryFriendlyByteBuf, NumenEventPayload> STREAM_CODEC =
             StreamCodec.composite(
                     UUIDUtil.STREAM_CODEC, NumenEventPayload::entityUuid,
-                    ByteBufCodecs.STRING_UTF8, NumenEventPayload::xml,
+                    ByteBufCodecs.stringUtf8(8192), NumenEventPayload::xml,
                     ByteBufCodecs.BOOL, NumenEventPayload::principal,
                     NumenEventPayload::new);
 

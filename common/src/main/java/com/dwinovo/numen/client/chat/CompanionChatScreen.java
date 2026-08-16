@@ -30,6 +30,10 @@ import java.util.UUID;
  */
 public class CompanionChatScreen extends Screen {
 
+    /** DSH 桥接专用日志器（latest.log 里搜 [ingame-bridge]）。 */
+    private static final org.slf4j.Logger DSH_BRIDGE_LOG =
+            org.slf4j.LoggerFactory.getLogger("NumenIngameBridge");
+
     private static final int INPUT_W = 300;
     private static final int INPUT_H = 14;
 
@@ -127,8 +131,81 @@ public class CompanionChatScreen extends Screen {
                 com.dwinovo.numen.client.hud.TalkHint.flash(
                         companionName + " 没能收到——它可能不在线", 3000);
             }
+            // DSH 桥接：把 Y 键对话内容同时直送 DeepSeek Harness（http://127.0.0.1:3080/ingame）
+            sendToDsh(text);
         }
         onClose();
+    }
+
+    /** 异步把对话内容 POST 到 DSH 的 /ingame 端点，失败静默，不影响游戏。 */
+    private void sendToDsh(String text) {
+        Thread t = new Thread(() -> {
+            try {
+                // 用 java.base 自带的 HttpURLConnection（mod 环境对 java.net.http 模块不可见）
+                String json = "{\"companion\":\"" + jsonEscape(companionName)
+                        + "\",\"text\":\"" + jsonEscape(text) + "\"}";
+                java.net.URL url = new java.net.URL("http://127.0.0.1:3080/ingame");
+                DSH_BRIDGE_LOG.info("[ingame-bridge] POST url={} proxy={} json={}",
+                        url, System.getProperty("http.proxyHost", "-"), json);
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(5000);
+                conn.setDoOutput(true);
+                byte[] payload = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                try (java.io.OutputStream os = conn.getOutputStream()) {
+                    os.write(payload);
+                }
+                int code = conn.getResponseCode();
+                String resp = readResponseBody(conn, code);
+                conn.disconnect();
+                DSH_BRIDGE_LOG.info("[ingame-bridge] -> dsh code={} resp={}", code, resp);
+            } catch (Exception e) {
+                DSH_BRIDGE_LOG.error("[ingame-bridge] -> dsh failed", e);
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** 读取响应体（4xx/5xx 走 errorStream），便于日志定位。 */
+    private static String readResponseBody(java.net.HttpURLConnection conn, int code) {
+        try {
+            java.io.InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            if (is == null) return "(no body)";
+            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(is, java.nio.charset.StandardCharsets.UTF_8))) {
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line);
+                return sb.length() == 0 ? "(empty)" : sb.toString();
+            }
+        } catch (Exception e) {
+            return "(read err: " + e.getMessage() + ")";
+        }
+    }
+
+    /** 最小 JSON 字符串转义（引号/反斜杠/控制字符）。 */
+    private static String jsonEscape(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
     }
 
     @Override

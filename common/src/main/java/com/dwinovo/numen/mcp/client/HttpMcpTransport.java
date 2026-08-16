@@ -68,7 +68,14 @@ public final class HttpMcpTransport implements McpTransport {
 
     @Override
     public void notify(JsonObject frame) {
-        http.sendAsync(build(frame, 10_000), HttpResponse.BodyHandlers.discarding());
+        // Fire-and-forget notification; swallow failures so an unreachable server
+        // never leaves an unobserved exceptional future behind.
+        http.sendAsync(build(frame, 10_000), HttpResponse.BodyHandlers.discarding())
+                .whenComplete((r, e) -> {
+                    if (e != null && !closed) {
+                        Constants.LOG.debug("[numen-mcp-client] notify failed: {}", e.toString());
+                    }
+                });
     }
 
     @Override

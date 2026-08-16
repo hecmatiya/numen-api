@@ -21,13 +21,30 @@ public final class TaskDispatch {
     }
 
     /**
+     * 车道被占时的统一处理:占着的是<b>常驻任务</b>(follow/company 这类没有
+     * "干完"的活)就直接顶掉,新任务上位(1.21.1 的"mine/fish 会顶掉跟随"
+     * 语义);占着的是正经活才拒绝,把选择权丢回给 LLM。
+     */
+    private static boolean preemptStanding(NumenPlayer companion, TaskRecord record,
+                                           Consumer<String> reply) {
+        TaskRecord busy = CompanionTickDispatcher.asyncTaskFor(companion.getUUID());
+        if (busy == null || !busy.isStanding()) {
+            return false;
+        }
+        CompanionTickDispatcher.stopActive(companion,
+                "preempted by " + record.getToolName());
+        return true;
+    }
+
+    /**
      * SYNC world-action tools:hand a built task record to the companion's
      * queue. 身体被异步任务占着时直接拒绝——同步任务排在几分钟的长活后面,
      * 等于把当前回合(和串行的工具派发器)整个卡死;拒绝话术把选择权丢回给 LLM。
+     * 常驻任务除外:被它占着就顶掉再排。
      */
     public static void enqueue(NumenPlayer companion, TaskRecord record, Consumer<String> reply) {
         TaskRecord busy = CompanionTickDispatcher.asyncTaskFor(companion.getUUID());
-        if (busy != null) {
+        if (busy != null && !preemptStanding(companion, record, reply)) {
             reply.accept(TaskResult.fail(busyMessage(busy, record)).toJson());
             return;
         }
@@ -37,15 +54,17 @@ public final class TaskDispatch {
     /**
      * ASYNC (long-running) tools:受理即回执 task_id,身体后台执行,收尾经
      * task_finished 事件送达。一次只受理一件——车道上有任何工作(同步在跑/
-     * 异步在跑或排队)都拒绝。
+     * 异步在跑或排队)都拒绝;常驻任务占着则顶掉它再受理。
      */
     public static void dispatchAsync(NumenPlayer companion, TaskRecord record, Consumer<String> reply) {
         if (CompanionTickDispatcher.llmLaneBusy(companion.getUUID())) {
-            TaskRecord busy = CompanionTickDispatcher.asyncTaskFor(companion.getUUID());
-            reply.accept(TaskResult.fail(busy != null
-                    ? busyMessage(busy, record)
-                    : "身体正在收尾上一个任务,稍候再派。").toJson());
-            return;
+            if (!preemptStanding(companion, record, reply)) {
+                TaskRecord busy = CompanionTickDispatcher.asyncTaskFor(companion.getUUID());
+                reply.accept(TaskResult.fail(busy != null
+                        ? busyMessage(busy, record)
+                        : "身体正在收尾上一个任务,稍候再派。").toJson());
+                return;
+            }
         }
         record.markAsync();
         CompanionTickDispatcher.queueFor(companion.getUUID()).enqueue(record);

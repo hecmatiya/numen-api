@@ -12,7 +12,6 @@ import com.dwinovo.numen.agent.tool.ToolRegistry;
 import com.dwinovo.numen.data.ModLanguageData;
 import com.dwinovo.numen.mcp.server.McpMode;
 import com.dwinovo.numen.platform.Services;
-import com.dwinovo.numen.platform.services.INumenConfig;
 import com.dwinovo.numen.task.TaskResult;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -85,6 +84,12 @@ public final class EntityAgentLoop {
     private static final int MIN_COMPACT_MESSAGES = 8;
     /** Circuit breaker: stop auto-retrying after this many consecutive failures. */
     private static final int MAX_COMPACT_FAILURES = 3;
+    /**
+     * 部分压缩(车万女仆式):只压最旧的段,保留最近这么多条原文。
+     * 压缩输入小 → 摘要生成快 → 发呆时间从"几十秒"降到"几秒"。
+     * 车万女仆 SUMMARY_KEEP_RECENT_COUNT 的同款参数。
+     */
+    private static final int KEEP_RECENT_COUNT = 32;
 
     private static final String COMPACT_SYSTEM_PROMPT =
             "You are a helpful AI assistant tasked with summarizing conversations "
@@ -409,7 +414,9 @@ public final class EntityAgentLoop {
         boolean deferred = awaitingLlmResponse || dispatcher.busy();
         // Wrap the owner's words in <query> so the model can always tell real user input apart from
         // anything else numen injects into the same user turn (events, and future world-state/reminders).
-        inbox.pushPrompt("<query>" + text + "</query>");
+        // 世界状态注入:把女仆身边的环境(自身/主人/附近实体)拼在 <query> 前,
+        // 模型不用先调感知工具就"看得到"周围(车万女仆式上下文注入)。
+        inbox.pushPrompt(com.dwinovo.numen.agent.prompt.WorldContextRegistry.wrap(text, entityUuid));
         Constants.LOG.info("[numen-entity#{}] user prompt ({} chars){}{}: {}",
                 entityUuid, text.length(),
                 wasAborted ? " — reset previous abort" : "",
@@ -671,32 +678,30 @@ public final class EntityAgentLoop {
     // ---- external control (an MCP client / Claude drives the body directly) ----
 
     /**
-     * An external driver takes control of this body. The internal brain stops
-     * starting turns and any in-flight turn/task is aborted (via {@link #abort},
-     * which also fires {@code CompanionLifecycle.onAbort} so the body itself
-     * stops), leaving the body free for the external driver. Reverse with
-     * {@link #releaseExternal}. Idempotent.
+     * 收回内置大脑的静默(默认状态):McpMode 开着时内置大脑本来就静默,
+     * 这个只是把 release_external 放行过的双脑状态收回来。abort 停掉内置
+     * 正在跑的回合,身体继续归外部大脑。Idempotent。
      */
     public void acquireExternal() {
-        if (externallyDriven) return;
-        externallyDriven = true;
+        if (!externallyDriven) return;
+        externallyDriven = false;
         abort();   // stop any running internal turn + free the body
-        Constants.LOG.info("[numen-entity#{}] external control acquired — internal brain paused", entityUuid);
+        Constants.LOG.info("[numen-entity#{}] external control reasserted — internal brain silent again", entityUuid);
     }
 
     /**
-     * The external driver released control — the internal brain may act again.
-     * Does not auto-start a turn; waits for the next owner prompt or event.
-     * Idempotent.
+     * 临时放行内置大脑(双脑模式):McpMode 开着时默认内置静默,调这个让它
+     * 也响应主人的话,与外部大脑并行。不自动开轮,等下一条主人话/事件。
+     * 想收回就 {@link #acquireExternal}。Idempotent。
      */
     public void releaseExternal() {
-        if (!externallyDriven) return;
-        externallyDriven = false;
-        turnPause = AgentTurnPause.NONE; // clear the owner-interrupt latch set by acquireExternal
-        Constants.LOG.info("[numen-entity#{}] external control released — internal brain resumed", entityUuid);
+        if (externallyDriven) return;
+        externallyDriven = true;
+        turnPause = AgentTurnPause.NONE; // clear any owner-interrupt latch
+        Constants.LOG.info("[numen-entity#{}] internal brain released for dual-brain mode", entityUuid);
     }
 
-    /** True while an external driver (MCP / Claude) holds this body. */
+    /** True while the internal brain has been released (dual-brain, McpMode aside). */
     public boolean isExternallyDriven() {
         return externallyDriven;
     }
@@ -954,11 +959,11 @@ public final class EntityAgentLoop {
             Constants.LOG.debug("[numen-entity#{}] tryStartTurn skipped: pause={}", entityUuid, turnPause);
             return;
         }
-        // 「外接大脑」模式的总闸:模式开着,身体归外部 MCP 驱动者,内置大脑一轮都不开。
-        // 收件箱照收不误(事件不丢),模式关掉后主人下次说话就能带着这段空白期的见闻开轮。
-        // 聊天框禁用只是体验层——弹幕/QQ 桥接送进来的 principal 消息只有这里拦得住。
-        if (McpMode.instance().enabled()) {
-            Constants.LOG.debug("[numen-entity#{}] tryStartTurn skipped: 外接大脑模式开启中", entityUuid);
+        // 「外接大脑」模式的总闸:McpMode 开着 = 内置大脑默认静默(身体归外部大脑,
+        // 不用手动接管);只有显式 release_external 放行(双脑模式)才恢复响应。
+        // 收件箱照收不误(事件不丢),收回静默后主人下次说话就能带着空白期的见闻开轮。
+        if (McpMode.instance().enabled() && !externallyDriven) {
+            Constants.LOG.debug("[numen-entity#{}] tryStartTurn skipped: 外接大脑模式开启中(内置静默)", entityUuid);
             return;
         }
         if (awaitingLlmResponse) {
@@ -1063,7 +1068,11 @@ public final class EntityAgentLoop {
      */
     private void startCompaction(boolean auto) {
         compacting = true;
-        List<ConvoState.Msg> request = new ArrayList<>(convo.snapshot());
+        // 部分压缩:只送"会被替换掉的旧段"给摘要(输入小 → 生成快 → 发呆短),
+        // 最近 KEEP_RECENT_COUNT 条原文不进摘要输入,原样保留。
+        List<ConvoState.Msg> snap = convo.snapshot();
+        int keep = Math.min(KEEP_RECENT_COUNT, snap.size());
+        List<ConvoState.Msg> request = new ArrayList<>(snap.subList(0, snap.size() - keep));
         request.add(new ConvoState.Msg.User(COMPACT_PROMPT));
         Constants.LOG.info("[numen-entity#{}] compaction started ({}, {} msgs)",
                 entityUuid, auto ? "auto" : "manual", request.size() - 1);
@@ -1149,11 +1158,11 @@ public final class EntityAgentLoop {
      * results, or an orphan tool result, would 400 the next request.
      */
     private List<ConvoState.Msg> preservedTail() {
-        if (convo.lastMessage() instanceof ConvoState.Msg.Assistant a
-                && !a.turn().hasToolCalls()) {
-            return List.of(a);
-        }
-        return List.of();
+        // 部分压缩:保留最近 KEEP_RECENT_COUNT 条原文(含最后的 assistant),
+        // 只压更旧的段——车万女仆式增量压缩。摘要层叠,信息逐层保留。
+        List<ConvoState.Msg> snap = convo.snapshot();
+        int keep = Math.min(KEEP_RECENT_COUNT, snap.size());
+        return new ArrayList<>(snap.subList(snap.size() - keep, snap.size()));
     }
 
     /**

@@ -26,7 +26,7 @@ public record NumenRespawnPayload(UUID entityUuid, String cause) implements Cust
     public static final StreamCodec<RegistryFriendlyByteBuf, NumenRespawnPayload> STREAM_CODEC =
             StreamCodec.composite(
                     UUIDUtil.STREAM_CODEC, NumenRespawnPayload::entityUuid,
-                    ByteBufCodecs.STRING_UTF8, NumenRespawnPayload::cause,
+                    ByteBufCodecs.stringUtf8(256), NumenRespawnPayload::cause,
                     NumenRespawnPayload::new);
 
     @Override

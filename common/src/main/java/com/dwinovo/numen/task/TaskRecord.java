@@ -55,6 +55,8 @@ public abstract class TaskRecord {
     private TaskResult result;
     /** 异步派发的记录:受理时已经回执过 tool_call,收尾改走 task_finished 事件。 */
     private boolean async;
+    /** 常驻任务(follow/company 这类"没有干完"的活):新任务派发时会被顶掉。 */
+    private boolean standing;
     /** 首次进入 RUNNING 的游戏刻;task_status 用它报已耗时。-1 = 还没开跑。 */
     private long startedGameTime = -1;
 
@@ -82,6 +84,10 @@ public abstract class TaskRecord {
 
     public final void markAsync() { this.async = true; }
     public final boolean isAsync() { return async; }
+
+    /** 标为常驻任务(follow/company):派新活时会被顶替,顶替走 cancelledMessage。 */
+    public final void markStanding() { this.standing = true; }
+    public final boolean isStanding() { return standing; }
 
     /**
      * Prefix of the synthetic tool-call ids NumenActuator mints for external (MCP)

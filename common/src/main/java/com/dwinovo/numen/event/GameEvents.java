@@ -26,7 +26,9 @@ public final class GameEvents {
         /** 身体自理日记(BodyLog 出口)。 */
         BODY_LOG("body_log"),
         /** 同伴自己跨了维度。 */
-        DIMENSION_CHANGE("dimension_change");
+        DIMENSION_CHANGE("dimension_change"),
+        /** 她给自己定的表到点了(set_timer,见 TimerRegistry)。 */
+        TIMER("timer");
 
         private final String kind;
 
